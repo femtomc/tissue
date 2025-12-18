@@ -1,0 +1,15 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Tissue local data (DB is regenerated from JSONL)
+.tissue/issues.db
+.tissue/issues.db-shm
+.tissue/issues.db-wal
+.tissue/lock
+
+# Temporary files
+tmp/
+
+# OS files
+.DS_Store
