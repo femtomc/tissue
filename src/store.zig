@@ -961,6 +961,10 @@ pub const Store = struct {
         try self.updateJsonlMetaForStat(stat, new_offset);
     }
 
+    pub fn forceReimport(self: *Store) !void {
+        try self.fullReimport();
+    }
+
     fn fullReimport(self: *Store) !void {
         try self.beginImmediate();
         errdefer sqlite.exec(self.db, "ROLLBACK;") catch {};

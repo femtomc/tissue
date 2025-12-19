@@ -30,7 +30,22 @@ pub fn main() !void {
     }
 
     const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
+    if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
+        printUsage();
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "help")) {
+        if (args.len >= 3) {
+            const topic = args[2];
+            if (topic.len == 0 or topic[0] == '-') {
+                printUsage();
+                return;
+            }
+            if (!printCommandHelp(topic)) {
+                die("unknown command: {s}", .{topic});
+            }
+            return;
+        }
         printUsage();
         return;
     }
@@ -76,6 +91,8 @@ pub fn main() !void {
             break :blk cmdDeps(allocator, stdout, &store, args[2..]);
         } else if (std.mem.eql(u8, cmd, "ready")) {
             break :blk cmdReady(allocator, stdout, &store, args[2..]);
+        } else if (std.mem.eql(u8, cmd, "clean")) {
+            break :blk cmdClean(allocator, stdout, &store, args[2..]);
         } else {
             die("unknown command: {s}", .{cmd});
         }
@@ -449,7 +466,7 @@ fn cmdStatus(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
         die("unknown flag: {s}", .{arg});
     }
 
-    if (id_input == null or status == null) die("usage: tissue status <id> <open|closed>", .{});
+    if (id_input == null or status == null) die("usage: tissue status <id> <open|in_progress|paused|duplicate|closed>", .{});
     validateStatus(status.?);
     const id = try store.resolveIssueId(id_input.?);
     defer allocator.free(id);
@@ -692,6 +709,236 @@ fn cmdReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store,
     try listReady(allocator, stdout, store, json);
 }
 
+fn cmdClean(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
+    var force = false;
+    var older_than_days: ?u32 = null;
+    var json = false;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--force")) {
+            force = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--older-than")) {
+            const val = nextValue(args, &i, "older-than");
+            older_than_days = parseDays(val);
+            continue;
+        }
+        die("unknown flag: {s}", .{arg});
+    }
+
+    // Find closed issues to clean
+    const closed_issues = try findClosedIssues(allocator, store, older_than_days);
+    defer {
+        for (closed_issues) |id| allocator.free(id);
+        allocator.free(closed_issues);
+    }
+
+    if (closed_issues.len == 0) {
+        if (json) {
+            try stdout.writeAll("{\"removed\":0,\"issues\":[]}\n");
+        } else {
+            try stdout.writeAll("No closed issues to clean.\n");
+        }
+        return;
+    }
+
+    if (json) {
+        try stdout.writeAll("{\"dry_run\":");
+        try stdout.writeAll(if (force) "false" else "true");
+        try stdout.writeAll(",\"count\":");
+        try stdout.print("{d}", .{closed_issues.len});
+        try stdout.writeAll(",\"issues\":[");
+        for (closed_issues, 0..) |id, idx| {
+            if (idx > 0) try stdout.writeByte(',');
+            try stdout.print("\"{s}\"", .{id});
+        }
+        try stdout.writeAll("]}\n");
+    } else {
+        if (force) {
+            try stdout.print("Removing {d} closed issue(s):\n", .{closed_issues.len});
+        } else {
+            try stdout.print("Would remove {d} closed issue(s) (use --force to execute):\n", .{closed_issues.len});
+        }
+        for (closed_issues) |id| {
+            // Fetch issue details for display
+            var issue = store.fetchIssue(id) catch {
+                try stdout.print("  {s}\n", .{id});
+                continue;
+            };
+            defer issue.deinit(allocator);
+            var title_buf: [30]u8 = undefined;
+            const title_display = truncateTitle(issue.title, &title_buf);
+            try stdout.print("  {s} {s}\n", .{ shortId(id), title_display });
+        }
+    }
+
+    if (!force) return;
+
+    // Actually remove the issues by rewriting JSONL
+    try rewriteJsonlWithoutIssues(allocator, store, closed_issues);
+    try store.forceReimport();
+
+    if (!json) {
+        try stdout.print("Cleaned {d} issue(s).\n", .{closed_issues.len});
+    }
+}
+
+fn findClosedIssues(allocator: std.mem.Allocator, store: *Store, older_than_days: ?u32) ![][]u8 {
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator, "SELECT id FROM issues WHERE status IN ('closed','duplicate')");
+    if (older_than_days) |days| {
+        const cutoff_ms = std.time.milliTimestamp() - (@as(i64, days) * 24 * 60 * 60 * 1000);
+        var buf: [32]u8 = undefined;
+        const cutoff_str = std.fmt.bufPrint(&buf, "{d}", .{cutoff_ms}) catch unreachable;
+        try sql.appendSlice(allocator, " AND updated_at < ");
+        try sql.appendSlice(allocator, cutoff_str);
+    }
+
+    const stmt = try tissue.sqlite.prepare(store.db, sql.items);
+    defer tissue.sqlite.finalize(stmt);
+
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (ids.items) |id| allocator.free(id);
+        ids.deinit(allocator);
+    }
+
+    while (try tissue.sqlite.step(stmt)) {
+        const id = tissue.sqlite.columnText(stmt, 0);
+        try ids.append(allocator, try allocator.dupe(u8, id));
+    }
+
+    return ids.toOwnedSlice(allocator);
+}
+
+fn rewriteJsonlWithoutIssues(allocator: std.mem.Allocator, store: *Store, ids_to_remove: []const []const u8) !void {
+    // Build a set of IDs to remove for fast lookup
+    var remove_set = std.StringHashMap(void).init(allocator);
+    defer remove_set.deinit();
+    for (ids_to_remove) |id| {
+        try remove_set.put(id, {});
+    }
+
+    // Read original JSONL
+    var jsonl_file = try std.fs.openFileAbsolute(store.jsonl_path, .{});
+    defer jsonl_file.close();
+    const stat = try jsonl_file.stat();
+    const jsonl_content = try allocator.alloc(u8, stat.size);
+    defer allocator.free(jsonl_content);
+    const bytes_read = try jsonl_file.readAll(jsonl_content);
+    _ = bytes_read;
+
+    // Create new JSONL content
+    var new_content: std.ArrayList(u8) = .empty;
+    defer new_content.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, jsonl_content, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        // Parse to check if this line should be removed
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+            // Keep malformed lines (they'll be skipped on import anyway)
+            try new_content.appendSlice(allocator, line);
+            try new_content.append(allocator, '\n');
+            continue;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .object) {
+            try new_content.appendSlice(allocator, line);
+            try new_content.append(allocator, '\n');
+            continue;
+        }
+
+        const obj = parsed.value.object;
+
+        // Check if this record should be removed
+        var should_remove = false;
+
+        // Get the ID field based on record type
+        const type_val = obj.get("type");
+        if (type_val) |tv| {
+            if (tv == .string) {
+                const type_str = tv.string;
+                if (std.mem.eql(u8, type_str, "issue")) {
+                    if (obj.get("id")) |id_val| {
+                        if (id_val == .string) {
+                            should_remove = remove_set.contains(id_val.string);
+                        }
+                    }
+                } else if (std.mem.eql(u8, type_str, "comment")) {
+                    if (obj.get("issue_id")) |id_val| {
+                        if (id_val == .string) {
+                            should_remove = remove_set.contains(id_val.string);
+                        }
+                    }
+                } else if (std.mem.eql(u8, type_str, "dep")) {
+                    // Remove deps where either src or dst is being removed
+                    if (obj.get("src_id")) |src_val| {
+                        if (src_val == .string and remove_set.contains(src_val.string)) {
+                            should_remove = true;
+                        }
+                    }
+                    if (!should_remove) {
+                        if (obj.get("dst_id")) |dst_val| {
+                            if (dst_val == .string and remove_set.contains(dst_val.string)) {
+                                should_remove = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!should_remove) {
+            try new_content.appendSlice(allocator, line);
+            try new_content.append(allocator, '\n');
+        }
+    }
+
+    // Write new JSONL (atomic via temp file)
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{store.jsonl_path});
+    defer allocator.free(tmp_path);
+
+    var tmp_file = try std.fs.createFileAbsolute(tmp_path, .{});
+    errdefer {
+        tmp_file.close();
+        std.fs.deleteFileAbsolute(tmp_path) catch {};
+    }
+
+    var write_buf: [4096]u8 = undefined;
+    var writer = tmp_file.writer(&write_buf);
+    try writer.interface.writeAll(new_content.items);
+    try writer.interface.flush();
+    tmp_file.close();
+
+    // Rename temp file to original
+    try std.fs.renameAbsolute(tmp_path, store.jsonl_path);
+}
+
+fn parseDays(val: []const u8) u32 {
+    // Parse "30d" or "30" format
+    var num_end: usize = val.len;
+    if (val.len > 0 and (val[val.len - 1] == 'd' or val[val.len - 1] == 'D')) {
+        num_end = val.len - 1;
+    }
+    return std.fmt.parseInt(u32, val[0..num_end], 10) catch {
+        die("invalid days value: {s}", .{val});
+    };
+}
+
 fn listIssues(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
@@ -712,6 +959,7 @@ fn listIssues(
         "(SELECT group_concat(t.name, ',') FROM tags t JOIN issue_tags it ON it.tag_id = t.id WHERE it.issue_id = i.id)";
     try sql.appendSlice(allocator, "SELECT i.id, i.status, i.title, i.updated_at, i.priority, ");
     try sql.appendSlice(allocator, tags_expr);
+    try sql.appendSlice(allocator, ", i.body");
     if (search != null) {
         try sql.appendSlice(allocator, " FROM issues_fts JOIN issues i ON i.rowid = issues_fts.rowid ");
     } else {
@@ -773,11 +1021,17 @@ fn listIssues(
                 status: []const u8,
                 title: []const u8,
                 updated_at: i64,
+                priority: i32,
+                tags: []const u8,
+                body: []const u8,
             }{
                 .id = tissue.sqlite.columnText(stmt, 0),
                 .status = tissue.sqlite.columnText(stmt, 1),
                 .title = tissue.sqlite.columnText(stmt, 2),
                 .updated_at = tissue.sqlite.columnInt64(stmt, 3),
+                .priority = tissue.sqlite.columnInt(stmt, 4),
+                .tags = tissue.sqlite.columnText(stmt, 5),
+                .body = tissue.sqlite.columnText(stmt, 6),
             };
             if (!first) try stdout.writeByte(',');
             first = false;
@@ -788,15 +1042,20 @@ fn listIssues(
         return;
     }
 
-    try stdout.print("{s:10} {s:7} {s:3} {s} {s}\n", .{ "ID", "Status", "Pri", "Title", "Tags" });
+    try stdout.print("{s:10} {s:7} {s:3} {s:30} {s:43} {s}\n", .{ "ID", "Status", "Pri", "Title", "Description", "Tags" });
     while (try tissue.sqlite.step(stmt)) {
         const id = tissue.sqlite.columnText(stmt, 0);
         const status_val = tissue.sqlite.columnText(stmt, 1);
         const title_val = tissue.sqlite.columnText(stmt, 2);
-        const priority_val = tissue.sqlite.columnInt(stmt, 4);
+        const priority_val: u32 = @intCast(tissue.sqlite.columnInt(stmt, 4));
         const tags_val = tissue.sqlite.columnText(stmt, 5);
+        const body_val = tissue.sqlite.columnText(stmt, 6);
         const tags_display = if (tags_val.len == 0) "-" else tags_val;
-        try stdout.print("{s:10} {s:7} {d:3} {s} {s}\n", .{ shortId(id), status_val, priority_val, title_val, tags_display });
+        var desc_buf: [48]u8 = undefined;
+        const desc = truncateDesc(body_val, &desc_buf);
+        var title_buf: [30]u8 = undefined;
+        const title_display = truncateTitle(title_val, &title_buf);
+        try stdout.print("{s:10} {s:7} {d:>3} {s:30} {s:43} {s}\n", .{ shortId(id), status_val, priority_val, title_display, desc, tags_display });
     }
 }
 
@@ -807,21 +1066,23 @@ fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
         \\  SELECT d.src_id, d.dst_id
         \\  FROM deps d
         \\  JOIN issues si ON si.id = d.src_id
-        \\  WHERE d.kind = 'blocks' AND d.state = 'active' AND si.status = 'open'
+        \\  WHERE d.kind = 'blocks' AND d.state = 'active' AND si.status IN ('open','in_progress','paused')
         \\  UNION
         \\  SELECT b.src, d.dst_id
         \\  FROM blockers b
         \\  JOIN deps d ON d.src_id = b.dst AND d.kind = 'blocks' AND d.state = 'active'
         \\  JOIN issues si ON si.id = d.src_id
-        \\  WHERE si.status = 'open'
+        \\  WHERE si.status IN ('open','in_progress','paused')
         \\)
-        \\SELECT i.id, i.status, i.title, i.updated_at
+        \\SELECT i.id, i.status, i.title, i.updated_at, i.priority,
+        \\  (SELECT group_concat(t.name, ',') FROM tags t JOIN issue_tags it ON it.tag_id = t.id WHERE it.issue_id = i.id),
+        \\  i.body
         \\FROM issues i
         \\WHERE i.status = 'open'
         \\AND NOT EXISTS (
         \\  SELECT 1 FROM blockers b
         \\  JOIN issues bi ON bi.id = b.src
-        \\  WHERE b.dst = i.id AND bi.status = 'open'
+        \\  WHERE b.dst = i.id AND bi.status IN ('open','in_progress','paused')
         \\)
         \\ORDER BY i.updated_at DESC
     ;
@@ -839,6 +1100,7 @@ fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
                 updated_at: i64,
                 priority: i32,
                 tags: []const u8,
+                body: []const u8,
             }{
                 .id = tissue.sqlite.columnText(stmt, 0),
                 .status = tissue.sqlite.columnText(stmt, 1),
@@ -846,6 +1108,7 @@ fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
                 .updated_at = tissue.sqlite.columnInt64(stmt, 3),
                 .priority = tissue.sqlite.columnInt(stmt, 4),
                 .tags = tissue.sqlite.columnText(stmt, 5),
+                .body = tissue.sqlite.columnText(stmt, 6),
             };
             if (!first) try stdout.writeByte(',');
             first = false;
@@ -856,18 +1119,20 @@ fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
         return;
     }
 
-    try stdout.print("{s:16} {s:1} {s:7} {s} {s}\n", .{ "ID", "P", "Status", "Title", "Tags" });
+    try stdout.print("{s:10} {s:1} {s:7} {s:30} {s:43} {s}\n", .{ "ID", "P", "Status", "Title", "Description", "Tags" });
     while (try tissue.sqlite.step(stmt)) {
         const id = tissue.sqlite.columnText(stmt, 0);
         const status_val = tissue.sqlite.columnText(stmt, 1);
         const title_val = tissue.sqlite.columnText(stmt, 2);
-        const priority_val = tissue.sqlite.columnInt(stmt, 4);
+        const priority_val: u32 = @intCast(tissue.sqlite.columnInt(stmt, 4));
         const tags_val = tissue.sqlite.columnText(stmt, 5);
-        try stdout.print("{s:16} {d:1} {s:7} {s}", .{ shortId(id), priority_val, status_val, title_val });
-        if (tags_val.len > 0) {
-            try stdout.print(" {s}", .{tags_val});
-        }
-        try stdout.writeByte('\n');
+        const body_val = tissue.sqlite.columnText(stmt, 6);
+        const tags_display = if (tags_val.len == 0) "-" else tags_val;
+        var desc_buf: [48]u8 = undefined;
+        const desc = truncateDesc(body_val, &desc_buf);
+        var title_buf: [30]u8 = undefined;
+        const title_display = truncateTitle(title_val, &title_buf);
+        try stdout.print("{s:10} {d} {s:7} {s:30} {s:43} {s}\n", .{ shortId(id), priority_val, status_val, title_display, desc, tags_display });
     }
 }
 
@@ -917,6 +1182,37 @@ fn shortId(id: []const u8) []const u8 {
     return id[0..len];
 }
 
+fn truncateDesc(body: []const u8, buf: *[48]u8) []const u8 {
+    if (body.len == 0) return "-";
+    // Find first line (stop at newline)
+    var end: usize = 0;
+    for (body) |c| {
+        if (c == '\n' or c == '\r') break;
+        end += 1;
+    }
+    const first_line = body[0..end];
+    const max_len: usize = 40;
+    if (first_line.len <= max_len) {
+        @memcpy(buf[0..first_line.len], first_line);
+        return buf[0..first_line.len];
+    }
+    @memcpy(buf[0..max_len], first_line[0..max_len]);
+    buf[max_len] = '.';
+    buf[max_len + 1] = '.';
+    buf[max_len + 2] = '.';
+    return buf[0 .. max_len + 3];
+}
+
+fn truncateTitle(title: []const u8, buf: *[30]u8) []const u8 {
+    const max_len: usize = 27;
+    if (title.len <= max_len) return title;
+    @memcpy(buf[0..max_len], title[0..max_len]);
+    buf[max_len] = '.';
+    buf[max_len + 1] = '.';
+    buf[max_len + 2] = '.';
+    return buf[0 .. max_len + 3];
+}
+
 fn formatTimestamp(millis: i64, buf: *[32]u8) []const u8 {
     const secs = @divFloor(millis, 1000);
     const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(secs)) };
@@ -955,8 +1251,12 @@ fn parseInt(comptime T: type, value: []const u8, name: []const u8) T {
 }
 
 fn validateStatus(status: []const u8) void {
-    if (std.mem.eql(u8, status, "open") or std.mem.eql(u8, status, "closed")) return;
-    die("invalid status: {s}", .{status});
+    if (std.mem.eql(u8, status, "open") or
+        std.mem.eql(u8, status, "in_progress") or
+        std.mem.eql(u8, status, "paused") or
+        std.mem.eql(u8, status, "duplicate") or
+        std.mem.eql(u8, status, "closed")) return;
+    die("invalid status: {s} (use open, in_progress, paused, duplicate, closed)", .{status});
 }
 
 fn validatePriority(priority: i32) void {
@@ -1086,17 +1386,402 @@ fn printUsage() void {
         \\tissue - fast local issue tracker
         \\
         \\Usage:
-        \\  tissue init [--json] [--prefix prefix]
-        \\  tissue new "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
-        \\  tissue list [--status open|closed] [--tag tag] [--search query] [--limit N] [--json]
-        \\  tissue show <id> [--json]
-        \\  tissue edit <id> [--title t] [--body b] [--status open|closed] [--priority 1-5] [--add-tag t] [--rm-tag t] [--json|--quiet]
-        \\  tissue status <id> <open|closed> [--json|--quiet]
-        \\  tissue comment <id> -m "text" [--json|--quiet]
-        \\  tissue tag <add|rm> <id> <tag> [--json|--quiet]
-        \\  tissue dep <add|rm> <id> <blocks|relates|parent> <target> [--json|--quiet]
-        \\  tissue deps <id> [--json]
-        \\  tissue ready [--json]
+        \\  tissue <command> [args] [--json]
+        \\
+        \\Behavior (agent-friendly):
+        \\  Exit codes: 0 success, 1 failure (errors on stderr)
+        \\  Store discovery: TISSUE_STORE wins; else walk up for .tissue
+        \\  --json outputs minified JSON with a trailing newline
+        \\  --quiet outputs id only (new/edit/status/comment/tag/dep; overrides --json)
+        \\  Body/message expands \n, \t, and \\
+        \\  JSON shapes: see README.md (JSON output reference)
+        \\  Status values: open, in_progress, paused, duplicate, closed
+        \\
+        \\ID input:
+        \\  full id, unique leading prefix, or hash prefix (no dash)
+        \\
+        \\Commands:
+        \\  help [command]
+        \\      Show general help or command-specific help.
+        \\
+        \\  init [--prefix prefix] [--json]
+        \\      Create the store directory and files.
+        \\
+        \\  new "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
+        \\      Create an issue. -t is repeatable. Default priority is 2.
+        \\
+        \\  list [--status open|in_progress|paused|duplicate|closed] [--tag tag] [--search query] [--limit N] [--json]
+        \\      List issues (newest first). --tag is exact match; --search uses SQLite FTS5.
+        \\
+        \\  show <id> [--json]
+        \\      Show full issue details, deps, and comments.
+        \\
+        \\  edit <id> [--title t] [--body b] [--status open|in_progress|paused|duplicate|closed] [--priority 1-5]
+        \\       [--add-tag t] [--rm-tag t] [--json|--quiet]
+        \\      Update fields/tags. At least one change is required.
+        \\
+        \\  status <id> <open|in_progress|paused|duplicate|closed> [--json|--quiet]
+        \\      Update status only.
+        \\
+        \\  comment <id> -m "text" [--json|--quiet]
+        \\      Add a comment (-m/--message required).
+        \\
+        \\  tag <add|rm> <id> <tag> [--json|--quiet]
+        \\      Add or remove a single tag.
+        \\
+        \\  dep <add|rm> <id> <blocks|relates|parent> <target> [--json|--quiet]
+        \\      Add or remove a dependency edge. relates is undirected.
+        \\
+        \\  deps <id> [--json]
+        \\      List active deps that involve the issue.
+        \\
+        \\  ready [--json]
+        \\      List open issues with no active blockers (open/in_progress/paused).
+        \\
+        \\  clean [--older-than Nd] [--force] [--json]
+        \\      Remove closed/duplicate issues from the JSONL log (use --force to execute).
+        \\
+        \\Examples:
+        \\  tissue init --prefix acme
+        \\  id=$(tissue new "Fix flaky tests" --quiet)
+        \\  tissue list --search "flake" --json
+        \\  tissue dep add $id blocks tissue-b19c2d
+        \\  tissue clean --older-than 30d --force
         \\
     , .{});
+}
+
+fn printCommandHelp(cmd: []const u8) bool {
+    if (std.mem.eql(u8, cmd, "help")) {
+        std.debug.print(
+            \\tissue help - show help
+            \\
+            \\Usage:
+            \\  tissue help
+            \\  tissue help <command>
+            \\
+            \\Description:
+            \\  Shows general help or detailed help for a single command.
+            \\
+            \\Examples:
+            \\  tissue help
+            \\  tissue help new
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "init")) {
+        std.debug.print(
+            \\tissue init - create store
+            \\
+            \\Usage:
+            \\  tissue init [--json] [--prefix prefix]
+            \\
+            \\Description:
+            \\  Creates the .tissue store directory and files. If it already exists,
+            \\  it is reused. Store discovery uses TISSUE_STORE or walks up for .tissue.
+            \\
+            \\Options:
+            \\  --prefix <p>  set or update the issue id prefix
+            \\  --json        output {{"store": "...", "prefix": "..."}}
+            \\
+            \\Output:
+            \\  Human: initialized/already initialized
+            \\  JSON: object on stdout; if already exists, a note is printed to stderr
+            \\
+            \\Examples:
+            \\  tissue init
+            \\  tissue init --prefix acme --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "new")) {
+        std.debug.print(
+            \\tissue new - create issue
+            \\
+            \\Usage:
+            \\  tissue new "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
+            \\
+            \\Description:
+            \\  Creates a new issue with status open. Tags are repeatable.
+            \\  Body/message expands \n, \t, and \\.
+            \\
+            \\Options:
+            \\  -b, --body <b>      optional body
+            \\  -t, --tag <t>       add a tag (repeatable)
+            \\  -p, --priority <n>  1 (highest) to 5 (lowest), default 2
+            \\  --json              output Issue record
+            \\  --quiet             output id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: issue id
+            \\  JSON: Issue record (see README.md JSON output reference)
+            \\
+            \\Examples:
+            \\  tissue new "Add caching" -b "Targets /v1/search" -t perf -p 1
+            \\  tissue new "Follow up" --quiet
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "list")) {
+        std.debug.print(
+            \\tissue list - list issues
+            \\
+            \\Usage:
+            \\  tissue list [--status open|in_progress|paused|duplicate|closed] [--tag tag] [--search query] [--limit N] [--json]
+            \\
+            \\Description:
+            \\  Lists issues, newest first. --tag is exact match. --search uses SQLite FTS5.
+            \\
+            \\Options:
+            \\  --status <s>  open, in_progress, paused, duplicate, or closed
+            \\  --tag <t>     filter by tag
+            \\  --search <q>  FTS5 query (use quotes for phrases)
+            \\  --limit <n>   max results
+            \\  --json        output array of list rows
+            \\
+            \\Output:
+            \\  Human: table with truncated title/body
+            \\  JSON: rows with full body and comma-separated tags
+            \\
+            \\Examples:
+            \\  tissue list --status open --limit 20
+            \\  tissue list --tag build --search "flake" --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "show")) {
+        std.debug.print(
+            \\tissue show - show issue
+            \\
+            \\Usage:
+            \\  tissue show <id> [--json]
+            \\
+            \\Description:
+            \\  Shows the full issue details, dependencies, and comments.
+            \\
+            \\Options:
+            \\  --json  output {{issue, comments, deps}}
+            \\
+            \\Output:
+            \\  Human: formatted issue view
+            \\  JSON: object with Issue, Comment[], Dep[]
+            \\
+            \\Example:
+            \\  tissue show tissue-a3f8e9 --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "edit")) {
+        std.debug.print(
+            \\tissue edit - update issue
+            \\
+            \\Usage:
+            \\  tissue edit <id> [--title t] [--body b] [--status open|in_progress|paused|duplicate|closed]
+            \\       [--priority 1-5] [--add-tag t] [--rm-tag t] [--json|--quiet]
+            \\
+            \\Description:
+            \\  Updates fields/tags. At least one change is required.
+            \\  Body/message expands \n, \t, and \\.
+            \\
+            \\Options:
+            \\  --title <t>      new title
+            \\  --body <b>       new body
+            \\  --status <s>     open, in_progress, paused, duplicate, or closed
+            \\  --priority <n>   1 (highest) to 5 (lowest)
+            \\  --add-tag <t>    add tag (repeatable)
+            \\  --rm-tag <t>     remove tag (repeatable)
+            \\  --json           output Issue record
+            \\  --quiet          output id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: issue id
+            \\  JSON: Issue record
+            \\
+            \\Examples:
+            \\  tissue edit tissue-a3f8e9 --status closed --rm-tag build
+            \\  tissue edit tissue-a3f8e9 --body "Line 1\nLine 2"
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "status")) {
+        std.debug.print(
+            \\tissue status - update status
+            \\
+            \\Usage:
+            \\  tissue status <id> <open|in_progress|paused|duplicate|closed> [--json|--quiet]
+            \\
+            \\Description:
+            \\  Shorthand for changing only the status field.
+            \\  Allowed values: open, in_progress, paused, duplicate, closed.
+            \\
+            \\Options:
+            \\  --json   output Issue record
+            \\  --quiet  output id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: issue id
+            \\  JSON: Issue record
+            \\
+            \\Example:
+            \\  tissue status tissue-a3f8e9 closed
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "comment")) {
+        std.debug.print(
+            \\tissue comment - add comment
+            \\
+            \\Usage:
+            \\  tissue comment <id> -m "text" [--json|--quiet]
+            \\
+            \\Description:
+            \\  Adds a comment to an issue. Body/message expands \n, \t, and \\.
+            \\
+            \\Options:
+            \\  -m, --message <t>  required comment text
+            \\  --json             output {{id, issue_id, body}}
+            \\  --quiet            output comment id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: comment id (ULID)
+            \\  JSON: {{id, issue_id, body}}
+            \\
+            \\Example:
+            \\  tissue comment tissue-a3f8e9 -m "Investigating\nWorking on fix"
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "tag")) {
+        std.debug.print(
+            \\tissue tag - add/remove tag
+            \\
+            \\Usage:
+            \\  tissue tag <add|rm> <id> <tag> [--json|--quiet]
+            \\
+            \\Description:
+            \\  Adds or removes a single tag.
+            \\
+            \\Options:
+            \\  --json   output Issue record
+            \\  --quiet  output id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: issue id
+            \\  JSON: Issue record
+            \\
+            \\Examples:
+            \\  tissue tag add tissue-a3f8e9 backlog
+            \\  tissue tag rm tissue-a3f8e9 backlog
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "dep")) {
+        std.debug.print(
+            \\tissue dep - add/remove dependency
+            \\
+            \\Usage:
+            \\  tissue dep <add|rm> <id> <blocks|relates|parent> <target> [--json|--quiet]
+            \\
+            \\Description:
+            \\  Adds or removes a dependency edge.
+            \\  blocks/parent are directional (src -> dst); relates is undirected.
+            \\
+            \\Options:
+            \\  --json   output {{action, src_id, dst_id, kind}}
+            \\  --quiet  output id only (overrides --json)
+            \\
+            \\Output:
+            \\  Default/quiet: source issue id
+            \\  JSON: {{action, src_id, dst_id, kind}}
+            \\
+            \\Examples:
+            \\  tissue dep add tissue-a3f8e9 blocks tissue-b19c2d
+            \\  tissue dep rm tissue-a3f8e9 relates tissue-b19c2d
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "deps")) {
+        std.debug.print(
+            \\tissue deps - list dependencies
+            \\
+            \\Usage:
+            \\  tissue deps <id> [--json]
+            \\
+            \\Description:
+            \\  Lists active dependencies that involve the issue.
+            \\
+            \\Options:
+            \\  --json  output array of Dep records
+            \\
+            \\Output:
+            \\  Human: "kind src -> dst" per line
+            \\  JSON: Dep records (state is active)
+            \\
+            \\Example:
+            \\  tissue deps tissue-a3f8e9 --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "ready")) {
+        std.debug.print(
+            \\tissue ready - list unblocked issues
+            \\
+            \\Usage:
+            \\  tissue ready [--json]
+            \\
+            \\Description:
+            \\  Lists open issues with no active blockers (transitive blocks only).
+            \\  Blockers include issues with status open, in_progress, or paused.
+            \\
+            \\Options:
+            \\  --json  output array of list rows
+            \\
+            \\Output:
+            \\  Same shape as tissue list
+            \\
+            \\Example:
+            \\  tissue ready --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "clean")) {
+        std.debug.print(
+            \\tissue clean - remove closed issues
+            \\
+            \\Usage:
+            \\  tissue clean [--older-than Nd] [--force] [--json]
+            \\
+            \\Description:
+            \\  Removes closed or duplicate issues from the JSONL log and rebuilds the cache.
+            \\  Without --force, this is a dry run.
+            \\
+            \\Options:
+            \\  --older-than <n>  only remove issues updated more than N days ago (30 or 30d)
+            \\  --force           perform the removal
+            \\  --json            output summary object
+            \\
+            \\Output:
+            \\  Human: list of issues to remove and a summary
+            \\  JSON: {{"dry_run":true,"count":N,"issues":[...]}} or {{"removed":0,"issues":[]}}
+            \\
+            \\Examples:
+            \\  tissue clean --older-than 30d
+            \\  tissue clean --older-than 30 --force --json
+            \\
+        , .{});
+        return true;
+    }
+    return false;
 }
