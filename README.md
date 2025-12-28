@@ -14,7 +14,7 @@ A machine-first issue tracker optimized for agents, featuring a git-native data 
 ## Install
 
 ```sh
-curl -fsSL https://github.com/femtomc/tissue/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/evil-mind-evil-sword/tissue/releases/latest/download/install.sh | sh
 ```
 
 <details>
