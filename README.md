@@ -1,11 +1,13 @@
 # tissue
 
-**A local issue tracker for AI agents.** Git-friendly, fast, non-interactive.
+**Issue tracking for agents.** Non-interactive, git-native, machine-first.
+
+A machine-first issue tracker optimized for agents, featuring a git-native data structure for conflict-free collaboration.
 
 ## Why?
 
-- **Non-interactive** — JSON output, exit codes, no prompts
-- **Git-native** — Append-only log merges cleanly
+- **Machine-First** — Designed for automation: JSON output, strict exit codes, no prompts
+- **Git-Native** — Append-only log merges cleanly without conflicts
 - **Fast** — SQLite + FTS5 for instant queries
 - **Portable** — Single static binary, zero dependencies
 
