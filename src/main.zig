@@ -6,13 +6,77 @@
 //!
 //! Commands: init, new, list, show, edit, status, comment, tag, dep, deps, ready, clean
 //!
-//! Store discovery: Uses TISSUE_STORE environment variable, or walks up
-//! the directory tree looking for a .tissue directory.
+//! Store discovery priority: --store flag > TISSUE_STORE env > directory walk
 
 const std = @import("std");
 const tissue = @import("tissue");
 
 const Store = tissue.store.Store;
+
+/// Global options parsed before the command.
+const GlobalOptions = struct {
+    store_path: ?[]const u8 = null,
+};
+
+/// Result of parsing global options from arguments.
+const ParsedArgs = struct {
+    global: GlobalOptions,
+    command_start: usize,
+};
+
+/// Parses global options (--store) before the command.
+/// Returns the global options and the index where the command starts.
+fn parseGlobalOptions(args: []const []const u8) ParsedArgs {
+    var result = ParsedArgs{
+        .global = .{},
+        .command_start = 1, // Skip program name
+    };
+
+    const store_eq_prefix = "--store=";
+
+    var i: usize = 1;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--store")) {
+            if (i + 1 >= args.len) {
+                die("missing value for --store", .{});
+            }
+            const path = args[i + 1];
+            if (path.len == 0) {
+                die("--store path cannot be empty", .{});
+            }
+            result.global.store_path = path;
+            i += 2;
+            result.command_start = i;
+        } else if (std.mem.startsWith(u8, arg, store_eq_prefix)) {
+            // Support --store=path syntax
+            const path = arg[store_eq_prefix.len..];
+            if (path.len == 0) {
+                die("--store path cannot be empty", .{});
+            }
+            result.global.store_path = path;
+            i += 1;
+            result.command_start = i;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // End of global options marker; command follows
+            i += 1;
+            result.command_start = i;
+            break;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            // Unknown long global flag
+            die("unknown global option: {s}\nGlobal options must come before the command. Use 'tissue --help' for usage.", .{arg});
+        } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
+            // Short flags like -h belong to commands, not global options
+            // Let them pass through to be handled as commands (will error appropriately)
+            break;
+        } else {
+            // First positional argument is the command
+            break;
+        }
+    }
+
+    return result;
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -35,19 +99,25 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
-    if (args.len < 2) {
+    // Parse global options (--store) before the command
+    const parsed = parseGlobalOptions(args);
+    const cmd_start = parsed.command_start;
+
+    if (cmd_start >= args.len) {
         printUsage();
         return;
     }
 
-    const cmd = args[1];
+    const cmd = args[cmd_start];
+    const cmd_args = args[cmd_start + 1 ..];
+
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         printUsage();
         return;
     }
     if (std.mem.eql(u8, cmd, "help")) {
-        if (args.len >= 3) {
-            const topic = args[2];
+        if (cmd_args.len >= 1) {
+            const topic = cmd_args[0];
             if (topic.len == 0 or topic[0] == '-') {
                 printUsage();
                 return;
@@ -62,13 +132,13 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, cmd, "init")) {
-        cmdInit(allocator, stdout, args[2..]) catch |err| {
+        cmdInit(allocator, stdout, cmd_args, parsed.global.store_path) catch |err| {
             dieOnError(err);
         };
         return;
     }
 
-    const store_dir = discoverStoreDir(allocator) catch |err| {
+    const store_dir = discoverStoreDir(allocator, parsed.global.store_path) catch |err| {
         dieOnError(err);
     };
     defer allocator.free(store_dir);
@@ -83,27 +153,27 @@ pub fn main() !void {
 
     const result: anyerror!void = blk: {
         if (std.mem.eql(u8, cmd, "new")) {
-            break :blk cmdNew(allocator, stdout, &store, args[2..]);
+            break :blk cmdNew(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "list")) {
-            break :blk cmdList(allocator, stdout, &store, args[2..]);
+            break :blk cmdList(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "show")) {
-            break :blk cmdShow(allocator, stdout, &store, args[2..]);
+            break :blk cmdShow(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "edit")) {
-            break :blk cmdEdit(allocator, stdout, &store, args[2..]);
+            break :blk cmdEdit(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "status")) {
-            break :blk cmdStatus(allocator, stdout, &store, args[2..]);
+            break :blk cmdStatus(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "comment")) {
-            break :blk cmdComment(allocator, stdout, &store, args[2..]);
+            break :blk cmdComment(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "tag")) {
-            break :blk cmdTag(allocator, stdout, &store, args[2..]);
+            break :blk cmdTag(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "dep")) {
-            break :blk cmdDep(allocator, stdout, &store, args[2..]);
+            break :blk cmdDep(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "deps")) {
-            break :blk cmdDeps(allocator, stdout, &store, args[2..]);
+            break :blk cmdDeps(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "ready")) {
-            break :blk cmdReady(allocator, stdout, &store, args[2..]);
+            break :blk cmdReady(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "clean")) {
-            break :blk cmdClean(allocator, stdout, &store, args[2..]);
+            break :blk cmdClean(allocator, stdout, &store, cmd_args);
         } else {
             die("unknown command: {s}", .{cmd});
         }
@@ -114,7 +184,7 @@ pub fn main() !void {
     };
 }
 
-fn cmdInit(allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const []const u8) !void {
+fn cmdInit(allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const []const u8, store_override: ?[]const u8) !void {
     var json = false;
     var prefix: ?[]const u8 = null;
     var i: usize = 0;
@@ -128,10 +198,18 @@ fn cmdInit(allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const [
         }
     }
 
-    const store_dir = try initStoreDir(allocator);
+    const store_dir = try initStoreDir(allocator, store_override);
     defer allocator.free(store_dir);
+
+    // Create parent directories recursively if needed (for --store paths like a/b/.tissue)
     std.fs.makeDirAbsolute(store_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
+        error.FileNotFound => {
+            // Parent doesn't exist; create full path recursively
+            const parent = std.fs.path.dirname(store_dir) orelse return err;
+            try std.fs.cwd().makePath(parent);
+            try std.fs.makeDirAbsolute(store_dir);
+        },
         else => return err,
     };
 
@@ -1310,7 +1388,15 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return result.toOwnedSlice(allocator);
 }
 
-fn discoverStoreDir(allocator: std.mem.Allocator) ![]const u8 {
+/// Discovers an existing store directory.
+/// Priority: override (--store) > TISSUE_STORE env > directory walk
+fn discoverStoreDir(allocator: std.mem.Allocator, override: ?[]const u8) ![]const u8 {
+    // Priority 1: --store flag
+    if (override) |path| {
+        return resolvePath(allocator, path);
+    }
+
+    // Priority 2: TISSUE_STORE environment variable
     if (std.process.getEnvVarOwned(allocator, "TISSUE_STORE")) |env| {
         defer allocator.free(env);
         return resolvePath(allocator, env);
@@ -1318,6 +1404,8 @@ fn discoverStoreDir(allocator: std.mem.Allocator) ![]const u8 {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
+
+    // Priority 3: Walk up directory tree
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
     var current: []const u8 = cwd;
@@ -1332,7 +1420,15 @@ fn discoverStoreDir(allocator: std.mem.Allocator) ![]const u8 {
     return tissue.store.StoreError.StoreNotFound;
 }
 
-fn initStoreDir(allocator: std.mem.Allocator) ![]const u8 {
+/// Determines the store directory for initialization.
+/// Priority: override (--store) > TISSUE_STORE env > cwd/.tissue
+fn initStoreDir(allocator: std.mem.Allocator, override: ?[]const u8) ![]const u8 {
+    // Priority 1: --store flag
+    if (override) |path| {
+        return resolvePath(allocator, path);
+    }
+
+    // Priority 2: TISSUE_STORE environment variable
     if (std.process.getEnvVarOwned(allocator, "TISSUE_STORE")) |env| {
         defer allocator.free(env);
         return resolvePath(allocator, env);
@@ -1340,6 +1436,8 @@ fn initStoreDir(allocator: std.mem.Allocator) ![]const u8 {
         error.EnvironmentVariableNotFound => {},
         else => return err,
     }
+
+    // Priority 3: Default to cwd/.tissue
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
     return std.fs.path.join(allocator, &.{ cwd, ".tissue" });
@@ -1398,11 +1496,15 @@ fn printUsage() void {
         \\tissue - fast local issue tracker
         \\
         \\Usage:
-        \\  tissue <command> [args] [--json]
+        \\  tissue [--store <path>] <command> [args] [--json]
+        \\
+        \\Global options:
+        \\  --store <path>  Use specified directory as the store (also --store=<path>)
+        \\  --              End of global options (useful when path starts with -)
         \\
         \\Behavior (agent-friendly):
         \\  Exit codes: 0 success, 1 failure (errors on stderr)
-        \\  Store discovery: TISSUE_STORE wins; else walk up for .tissue
+        \\  Store discovery: --store wins; else TISSUE_STORE; else walk up for .tissue
         \\  --json outputs minified JSON with a trailing newline
         \\  --quiet outputs id only (new/edit/status/comment/tag/dep; overrides --json)
         \\  Body/message expands \n, \t, and \\

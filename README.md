@@ -104,12 +104,14 @@ tissue list  # rebuilds the cache
 - `--quiet` returns only an ID (issue id or comment id) and overrides `--json`.
 - `--body` and `-m/--message` expand `\n`, `\t`, and `\\`.
 - IDs accept full IDs, unique leading prefixes, or hash prefixes (when no dash is present).
-- Store discovery: `TISSUE_STORE` wins; otherwise, walk up from cwd to find `.tissue`.
+- Store discovery: `--store` wins; then `TISSUE_STORE` env; then walk up from cwd to find `.tissue`.
 
 ## Store location and layout
 
 - Default store: `.tissue` in the current repo (walks up).
-- Override: `TISSUE_STORE=/absolute/or/relative/path` (relative paths resolved from cwd).
+- Override via CLI: `tissue --store <path> <command>` or `--store=<path>` (e.g., `--store .claude/.tissue`).
+- Override via env: `TISSUE_STORE=/absolute/or/relative/path` (relative paths resolved from cwd).
+- Parent directories are created automatically (e.g., `--store .claude/.tissue` creates `.claude/` if needed).
 - Files:
   - `.tissue/issues.jsonl` append-only log (source of truth).
   - `.tissue/issues.db*` SQLite cache (derived).
@@ -462,6 +464,14 @@ Link issues:
 ```sh
 tissue dep add "$id" blocks "$other"
 tissue dep add "$id" relates "$other"
+```
+
+Use a custom store location (e.g., for AI agent isolation):
+
+```sh
+tissue --store .claude/.tissue init
+tissue --store .claude/.tissue new "Agent task" --quiet
+tissue --store .claude/.tissue list --json
 ```
 
 ## Git-based sync
