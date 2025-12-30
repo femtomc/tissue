@@ -708,6 +708,82 @@ pub const Store = struct {
         };
     }
 
+    /// Lists open issues with no active blockers (transitively).
+    ///
+    /// An issue is "ready" if it is open and has no unresolved blocking issues
+    /// (where blockers are issues with status open, in_progress, or paused).
+    /// Returns an allocated slice; the caller must free each issue and the slice.
+    pub fn listReadyIssues(self: *Store) ![]Issue {
+        const sql =
+            \\WITH RECURSIVE blockers(src, dst) AS (
+            \\  SELECT d.src_id, d.dst_id
+            \\  FROM deps d
+            \\  JOIN issues si ON si.id = d.src_id
+            \\  WHERE d.kind = 'blocks' AND d.state = 'active' AND si.status IN ('open','in_progress','paused')
+            \\  UNION
+            \\  SELECT b.src, d.dst_id
+            \\  FROM blockers b
+            \\  JOIN deps d ON d.src_id = b.dst AND d.kind = 'blocks' AND d.state = 'active'
+            \\  JOIN issues si ON si.id = d.src_id
+            \\  WHERE si.status IN ('open','in_progress','paused')
+            \\)
+            \\SELECT i.id, i.title, i.body, i.status, i.priority, i.created_at, i.updated_at, i.rev
+            \\FROM issues i
+            \\WHERE i.status = 'open'
+            \\AND NOT EXISTS (
+            \\  SELECT 1 FROM blockers b
+            \\  JOIN issues bi ON bi.id = b.src
+            \\  WHERE b.dst = i.id AND bi.status IN ('open','in_progress','paused')
+            \\)
+            \\ORDER BY i.priority ASC, i.updated_at DESC
+        ;
+        const stmt = try sqlite.prepare(self.db, sql);
+        defer sqlite.finalize(stmt);
+
+        var list: std.ArrayListUnmanaged(Issue) = .empty;
+        errdefer {
+            for (list.items) |*issue| issue.deinit(self.allocator);
+            list.deinit(self.allocator);
+        }
+
+        while (try sqlite.step(stmt)) {
+            const issue_id = try dupColumn(self.allocator, stmt, 0);
+            errdefer self.allocator.free(issue_id);
+
+            const title = try dupColumn(self.allocator, stmt, 1);
+            errdefer self.allocator.free(title);
+
+            const body = try dupColumn(self.allocator, stmt, 2);
+            errdefer self.allocator.free(body);
+
+            const status = try dupColumn(self.allocator, stmt, 3);
+            errdefer self.allocator.free(status);
+
+            const priority = sqlite.columnInt(stmt, 4);
+            const created_at = sqlite.columnInt64(stmt, 5);
+            const updated_at = sqlite.columnInt64(stmt, 6);
+
+            const rev = try dupColumn(self.allocator, stmt, 7);
+            errdefer self.allocator.free(rev);
+
+            const tags = try self.fetchTags(issue_id);
+
+            try list.append(self.allocator, Issue{
+                .id = issue_id,
+                .title = title,
+                .body = body,
+                .status = status,
+                .priority = priority,
+                .created_at = created_at,
+                .updated_at = updated_at,
+                .rev = rev,
+                .tags = tags,
+            });
+        }
+
+        return list.toOwnedSlice(self.allocator);
+    }
+
     /// Fetches all comments for an issue, ordered by creation time.
     ///
     /// Returns an allocated slice; the caller must free each comment and the slice.
