@@ -106,6 +106,48 @@ pub const Dep = struct {
     }
 };
 
+/// Discovers the .tissue store directory by walking up from cwd.
+///
+/// Priority:
+/// 1. TISSUE_STORE environment variable
+/// 2. Walk up directory tree looking for .tissue
+///
+/// Returns an allocated path; caller must free.
+pub fn discoverStoreDir(allocator: std.mem.Allocator) ![]const u8 {
+    // Check TISSUE_STORE environment variable
+    if (std.process.getEnvVarOwned(allocator, "TISSUE_STORE")) |env| {
+        defer allocator.free(env);
+        if (std.fs.path.isAbsolute(env)) {
+            return allocator.dupe(u8, env);
+        }
+        const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+        defer allocator.free(cwd);
+        return std.fs.path.join(allocator, &.{ cwd, env });
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    // Walk up directory tree
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+    var current: []const u8 = cwd;
+    while (true) {
+        const candidate = try std.fs.path.join(allocator, &.{ current, ".tissue" });
+        if (dirExists(candidate)) return candidate;
+        allocator.free(candidate);
+        const parent = std.fs.path.dirname(current) orelse break;
+        if (std.mem.eql(u8, parent, current)) break;
+        current = parent;
+    }
+    return StoreError.StoreNotFound;
+}
+
+fn dirExists(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
 /// The main data store for issues, comments, and dependencies.
 ///
 /// Manages both the SQLite cache (for fast queries) and the JSONL append log
