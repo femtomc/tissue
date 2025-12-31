@@ -941,6 +941,23 @@ pub const Store = struct {
         return list.toOwnedSlice(self.allocator);
     }
 
+    /// Counts open issues that have the specified tag.
+    pub fn countOpenIssuesByTag(self: *Store, tag: []const u8) !u32 {
+        const stmt = try sqlite.prepare(self.db,
+            \\SELECT COUNT(*)
+            \\FROM issues i
+            \\JOIN issue_tags it ON it.issue_id = i.id
+            \\JOIN tags t ON t.id = it.tag_id
+            \\WHERE i.status = 'open' AND t.name = ?;
+        );
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, tag);
+        if (try sqlite.step(stmt)) {
+            return @intCast(sqlite.columnInt64(stmt, 0));
+        }
+        return 0;
+    }
+
     fn issueExists(self: *Store, id: []const u8) !bool {
         const stmt = try sqlite.prepare(self.db, "SELECT 1 FROM issues WHERE id = ? LIMIT 1;");
         defer sqlite.finalize(stmt);
