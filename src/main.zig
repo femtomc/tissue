@@ -116,7 +116,7 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.writeAll("tissue 0.3.1\n");
+        try stdout.writeAll("tissue 0.3.2\n");
         return;
     }
     if (std.mem.eql(u8, cmd, "help")) {
