@@ -13,6 +13,8 @@ const ids = @import("ids.zig");
 pub const StoreError = error{
     /// No .tissue directory found in current or parent directories.
     StoreNotFound,
+    /// Store directory already exists (during init).
+    StoreAlreadyExists,
     /// The specified issue ID does not exist.
     IssueNotFound,
     /// The provided ID prefix matches multiple issues.
@@ -162,6 +164,32 @@ pub const Store = struct {
     ulid: ids.Generator,
     id_prefix: []const u8,
     lock_file: ?std.fs.File = null,
+
+    /// Initializes a new store at the given directory path.
+    ///
+    /// Creates the directory, empty issues.jsonl, and .gitignore.
+    /// Returns StoreAlreadyExists if the directory already exists.
+    /// After init, call open() to get a usable Store instance.
+    pub fn init(allocator: std.mem.Allocator, dir: []const u8) !void {
+        // Create .tissue directory
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => return StoreError.StoreAlreadyExists,
+            else => return err,
+        };
+
+        // Create empty issues.jsonl
+        const jsonl_path = try std.fs.path.join(allocator, &.{ dir, "issues.jsonl" });
+        defer allocator.free(jsonl_path);
+        const jsonl_file = try std.fs.createFileAbsolute(jsonl_path, .{ .truncate = false });
+        jsonl_file.close();
+
+        // Create .gitignore
+        const gitignore_path = try std.fs.path.join(allocator, &.{ dir, ".gitignore" });
+        defer allocator.free(gitignore_path);
+        const gitignore = try std.fs.createFileAbsolute(gitignore_path, .{ .truncate = true });
+        defer gitignore.close();
+        try gitignore.writeAll("*.db\n*.db-wal\n*.db-shm\nlock\n");
+    }
 
     /// Opens or creates a store at the given directory path.
     ///
