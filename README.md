@@ -91,6 +91,18 @@ All commands support `--json` for machine output and `--quiet` for ID-only outpu
 
 The JSONL log is the source of truth. The SQLite cache is rebuilt automatically when stale—delete it anytime.
 
+## Related
+
+tissue follows a long tradition of git-native issue tracking:
+
+**Distributed Trackers.** [git-bug](https://github.com/git-bug/git-bug) stores issues as git objects rather than files, with bridges to GitHub and GitLab. [driusan/bug](https://github.com/driusan/bug) uses plain text files that branch and merge with your code. [git-issue](https://github.com/dspinellis/git-issue) takes a similar filesystem approach.
+
+**Foundational Work.** [Fossil](https://fossil-scm.org/) by D. Richard Hipp (SQLite author) pioneered the idea of a VCS with built-in issue tracking and wiki. Its design influenced many later distributed trackers.
+
+**Modern Alternatives.** For teams that want a hosted solution, [Plane](https://plane.so/) is an open-source alternative to Jira and Linear. The [GitHub CLI](https://cli.github.com/) provides scriptable access to GitHub Issues.
+
+tissue differs from these by optimizing specifically for agent automation—strict JSON output, meaningful exit codes, and no interactive prompts.
+
 ## Name
 
 **t**racking **issue**s.
