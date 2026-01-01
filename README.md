@@ -93,15 +93,11 @@ The JSONL log is the source of truth. The SQLite cache is rebuilt automatically 
 
 ## Related
 
-tissue follows a long tradition of git-native issue tracking:
+tissue was directly inspired by [Beads](https://github.com/steveyegge/beads), Steve Yegge's memory system for coding agents. Beads introduced the pattern of JSONL-backed issue tracking with SQLite caching, dependency graphs, and agent-friendly `--json` flags. tissue adopts the same architecture while focusing on simplicity and the emes plugin ecosystem.
 
-**Distributed Trackers.** [git-bug](https://github.com/git-bug/git-bug) stores issues as git objects rather than files, with bridges to GitHub and GitLab. [driusan/bug](https://github.com/driusan/bug) uses plain text files that branch and merge with your code. [git-issue](https://github.com/dspinellis/git-issue) takes a similar filesystem approach.
+**Agent-Focused CLI Tools.** The 2024-2025 explosion of agentic coding tools—[Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Aider](https://aider.chat/), [Codex CLI](https://github.com/openai/codex)—created demand for agent-native infrastructure. These tools work best with explicit context files and non-interactive utilities that compose in scripts and pipelines.
 
-**Foundational Work.** [Fossil](https://fossil-scm.org/) by D. Richard Hipp (SQLite author) pioneered the idea of a VCS with built-in issue tracking and wiki. Its design influenced many later distributed trackers.
-
-**Modern Alternatives.** For teams that want a hosted solution, [Plane](https://plane.so/) is an open-source alternative to Jira and Linear. The [GitHub CLI](https://cli.github.com/) provides scriptable access to GitHub Issues.
-
-tissue differs from these by optimizing specifically for agent automation—strict JSON output, meaningful exit codes, and no interactive prompts.
+**Git-Native Trackers.** [git-bug](https://github.com/git-bug/git-bug) stores issues as git objects with bridges to GitHub/GitLab. [Fossil](https://fossil-scm.org/) by D. Richard Hipp pioneered VCS-integrated issue tracking. [driusan/bug](https://github.com/driusan/bug) uses plain text files that merge with your code.
 
 ## Name
 
