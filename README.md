@@ -24,10 +24,9 @@ cp zig-out/bin/tissue /usr/local/bin/
 
 ## Why?
 
-- **Machine-First** — Designed for automation: JSON output, strict exit codes, no prompts
-- **Git-Native** — Append-only log merges cleanly without conflicts
-- **Fast** — SQLite + FTS5 for instant queries
-- **Portable** — Single static binary, zero dependencies
+Most issue trackers are built for humans clicking through web UIs. That doesn't work for agents, which need to create issues, check status, and close tickets programmatically. They can't answer interactive prompts or parse HTML.
+
+tissue is non-interactive by design. Every command returns JSON on stdout, errors on stderr, and meaningful exit codes. The underlying storage is an append-only JSONL log that merges cleanly in git—no conflicts when multiple agents create issues simultaneously. A SQLite cache with FTS5 makes queries fast, but you can delete it anytime; it rebuilds from the log.
 
 ## Quick start
 
