@@ -20,7 +20,7 @@ curl -fsSL https://github.com/evil-mind-evil-sword/tissue/releases/latest/downlo
 <details>
 <summary>Other methods</summary>
 
-**Pre-built binaries:** [GitHub Releases](https://github.com/femtomc/tissue/releases)
+**Pre-built binaries:** [GitHub Releases](https://github.com/evil-mind-evil-sword/tissue/releases)
 
 **From source** (requires [Zig](https://ziglang.org/) 0.15.2+):
 ```sh
