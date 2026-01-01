@@ -4,13 +4,6 @@
 
 A machine-first issue tracker optimized for agents, featuring a git-native data structure for conflict-free collaboration.
 
-## Why?
-
-- **Machine-First** — Designed for automation: JSON output, strict exit codes, no prompts
-- **Git-Native** — Append-only log merges cleanly without conflicts
-- **Fast** — SQLite + FTS5 for instant queries
-- **Portable** — Single static binary, zero dependencies
-
 ## Install
 
 ```sh
@@ -28,6 +21,13 @@ zig build -Doptimize=ReleaseFast
 cp zig-out/bin/tissue /usr/local/bin/
 ```
 </details>
+
+## Why?
+
+- **Machine-First** — Designed for automation: JSON output, strict exit codes, no prompts
+- **Git-Native** — Append-only log merges cleanly without conflicts
+- **Fast** — SQLite + FTS5 for instant queries
+- **Portable** — Single static binary, zero dependencies
 
 ## Quick start
 
