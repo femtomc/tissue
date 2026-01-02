@@ -4,7 +4,7 @@
 //! tissue CLI. It handles argument parsing, store discovery, and formatting
 //! of output (both human-readable and JSON).
 //!
-//! Commands: init, new, list, show, edit, status, comment, tag, dep, deps, ready, clean
+//! Commands: init, post (new), list, search, show, edit, status, reply (comment), tag, dep, deps, ready, clean
 //!
 //! Store discovery priority: --store flag > TISSUE_STORE env > directory walk
 
