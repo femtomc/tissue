@@ -156,17 +156,19 @@ pub fn main() !void {
     };
 
     const result: anyerror!void = blk: {
-        if (std.mem.eql(u8, cmd, "new")) {
+        if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "post")) {
             break :blk cmdNew(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "list")) {
             break :blk cmdList(allocator, stdout, &store, cmd_args);
+        } else if (std.mem.eql(u8, cmd, "search")) {
+            break :blk cmdSearch(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "show")) {
             break :blk cmdShow(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "edit")) {
             break :blk cmdEdit(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "status")) {
             break :blk cmdStatus(allocator, stdout, &store, cmd_args);
-        } else if (std.mem.eql(u8, cmd, "comment")) {
+        } else if (std.mem.eql(u8, cmd, "comment") or std.mem.eql(u8, cmd, "reply")) {
             break :blk cmdComment(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "tag")) {
             break :blk cmdTag(allocator, stdout, &store, cmd_args);
@@ -340,12 +342,18 @@ fn cmdList(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, 
     var search: ?[]const u8 = null;
     var limit: ?i64 = null;
     var json = false;
+    var summary = false;
 
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+            summary = true;
             i += 1;
             continue;
         }
@@ -370,7 +378,44 @@ fn cmdList(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, 
         die("unknown flag: {s}", .{arg});
     }
 
-    try listIssues(allocator, stdout, store, status, tag, search, limit, json);
+    try listIssues(allocator, stdout, store, status, tag, search, limit, json, summary);
+}
+
+fn cmdSearch(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
+    var query: ?[]const u8 = null;
+    var limit: ?i64 = null;
+    var json = false;
+    var summary = false;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+            summary = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--limit")) {
+            const val = nextValue(args, &i, "limit");
+            limit = parseInt(i64, val, "limit");
+            continue;
+        }
+        if (arg.len > 0 and arg[0] != '-') {
+            if (query != null) die("multiple queries provided", .{});
+            query = arg;
+            i += 1;
+            continue;
+        }
+        die("unknown flag: {s}", .{arg});
+    }
+
+    if (query == null) die("query required", .{});
+    try listIssues(allocator, stdout, store, null, null, query, limit, json, summary);
 }
 
 fn cmdShow(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
@@ -1042,6 +1087,7 @@ fn listIssues(
     search: ?[]const u8,
     limit: ?i64,
     json: bool,
+    summary: bool,
 ) !void {
     var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(allocator);
@@ -1136,7 +1182,11 @@ fn listIssues(
         return;
     }
 
-    try stdout.print("{s:10} {s:7} {s:3} {s:30} {s:43} {s}\n", .{ "ID", "Status", "Pri", "Title", "Description", "Tags" });
+    if (summary) {
+        try stdout.print("{s:10} {s:11} {s:3} {s:30} {s}\n", .{ "ID", "Status", "Pri", "Title", "Tags" });
+    } else {
+        try stdout.print("{s:10} {s:11} {s:3} {s:30} {s:43} {s}\n", .{ "ID", "Status", "Pri", "Title", "Description", "Tags" });
+    }
     while (try tissue.sqlite.step(stmt)) {
         const id = tissue.sqlite.columnText(stmt, 0);
         const status_val = tissue.sqlite.columnText(stmt, 1);
@@ -1145,11 +1195,15 @@ fn listIssues(
         const tags_val = tissue.sqlite.columnText(stmt, 5);
         const body_val = tissue.sqlite.columnText(stmt, 6);
         const tags_display = if (tags_val.len == 0) "-" else tags_val;
-        var desc_buf: [48]u8 = undefined;
-        const desc = truncateDesc(body_val, &desc_buf);
         var title_buf: [30]u8 = undefined;
         const title_display = truncateTitle(title_val, &title_buf);
-        try stdout.print("{s:10} {s:7} {d:>3} {s:30} {s:43} {s}\n", .{ shortId(id), status_val, priority_val, title_display, desc, tags_display });
+        if (summary) {
+            try stdout.print("{s:10} {s:11} {d:>3} {s:30} {s}\n", .{ shortId(id), status_val, priority_val, title_display, tags_display });
+        } else {
+            var desc_buf: [48]u8 = undefined;
+            const desc = truncateDesc(body_val, &desc_buf);
+            try stdout.print("{s:10} {s:11} {d:>3} {s:30} {s:43} {s}\n", .{ shortId(id), status_val, priority_val, title_display, desc, tags_display });
+        }
     }
 }
 
@@ -1525,11 +1579,15 @@ fn printUsage() void {
         \\  init [--prefix prefix] [--json]
         \\      Create the store directory and files.
         \\
-        \\  new "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
-        \\      Create an issue. -t is repeatable. Default priority is 2.
+        \\  post "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
+        \\      Create an issue. -t is repeatable. Default priority is 2. (alias: new)
         \\
-        \\  list [--status open|in_progress|paused|duplicate|closed] [--tag tag] [--search query] [--limit N] [--json]
-        \\      List issues (newest first). --tag is exact match; --search uses SQLite FTS5.
+        \\  list [--status s] [--tag t] [--search q] [--limit N] [-s|--summary] [--json]
+        \\      List issues (newest first). --tag is exact match; --search uses FTS5.
+        \\      -s/--summary omits description column for compact output.
+        \\
+        \\  search <query> [--limit N] [-s|--summary] [--json]
+        \\      Search issues using FTS5 (standalone command for list --search).
         \\
         \\  show <id> [--json]
         \\      Show full issue details, deps, and comments.
@@ -1541,8 +1599,8 @@ fn printUsage() void {
         \\  status <id> <open|in_progress|paused|duplicate|closed> [--json|--quiet]
         \\      Update status only.
         \\
-        \\  comment <id> -m "text" [--json|--quiet]
-        \\      Add a comment (-m/--message required).
+        \\  reply <id> -m "text" [--json|--quiet]
+        \\      Add a comment (-m/--message required). (alias: comment)
         \\
         \\  tag <add|rm> <id> <tag> [--json|--quiet]
         \\      Add or remove a single tag.
@@ -1614,12 +1672,12 @@ fn printCommandHelp(cmd: []const u8) bool {
         , .{});
         return true;
     }
-    if (std.mem.eql(u8, cmd, "new")) {
+    if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "post")) {
         std.debug.print(
-            \\tissue new - create issue
+            \\tissue post - create issue (alias: new)
             \\
             \\Usage:
-            \\  tissue new "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
+            \\  tissue post "title" [-b body] [-t tag] [-p 1-5] [--json|--quiet]
             \\
             \\Description:
             \\  Creates a new issue with status open. Tags are repeatable.
@@ -1637,8 +1695,8 @@ fn printCommandHelp(cmd: []const u8) bool {
             \\  JSON: Issue record (see README.md JSON output reference)
             \\
             \\Examples:
-            \\  tissue new "Add caching" -b "Targets /v1/search" -t perf -p 1
-            \\  tissue new "Follow up" --quiet
+            \\  tissue post "Add caching" -b "Targets /v1/search" -t perf -p 1
+            \\  tissue post "Follow up" --quiet
             \\
         , .{});
         return true;
@@ -1648,25 +1706,54 @@ fn printCommandHelp(cmd: []const u8) bool {
             \\tissue list - list issues
             \\
             \\Usage:
-            \\  tissue list [--status open|in_progress|paused|duplicate|closed] [--tag tag] [--search query] [--limit N] [--json]
+            \\  tissue list [--status s] [--tag t] [--search q] [--limit N] [-s|--summary] [--json]
             \\
             \\Description:
             \\  Lists issues, newest first. --tag is exact match. --search uses SQLite FTS5.
             \\
             \\Options:
-            \\  --status <s>  open, in_progress, paused, duplicate, or closed
-            \\  --tag <t>     filter by tag
-            \\  --search <q>  FTS5 query (use quotes for phrases)
-            \\  --limit <n>   max results
-            \\  --json        output array of list rows
+            \\  --status <s>    open, in_progress, paused, duplicate, or closed
+            \\  --tag <t>       filter by tag
+            \\  --search <q>    FTS5 query (use quotes for phrases)
+            \\  --limit <n>     max results
+            \\  -s, --summary   omit description column for compact output
+            \\  --json          output array of list rows
             \\
             \\Output:
-            \\  Human: table with truncated title/body
+            \\  Human: table with truncated title/body (or just title with -s)
             \\  JSON: rows with full body and comma-separated tags
             \\
             \\Examples:
             \\  tissue list --status open --limit 20
             \\  tissue list --tag build --search "flake" --json
+            \\  tissue list -s
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "search")) {
+        std.debug.print(
+            \\tissue search - search issues
+            \\
+            \\Usage:
+            \\  tissue search <query> [--limit N] [-s|--summary] [--json]
+            \\
+            \\Description:
+            \\  Searches issues using SQLite FTS5. Standalone command equivalent to
+            \\  'tissue list --search <query>'. Results ranked by BM25 relevance.
+            \\
+            \\Options:
+            \\  --limit <n>     max results
+            \\  -s, --summary   omit description column for compact output
+            \\  --json          output array of list rows
+            \\
+            \\Output:
+            \\  Human: table with truncated title/body (or just title with -s)
+            \\  JSON: rows with full body and comma-separated tags
+            \\
+            \\Examples:
+            \\  tissue search "authentication bug"
+            \\  tissue search cache --limit 10 --json
             \\
         , .{});
         return true;
@@ -1752,12 +1839,12 @@ fn printCommandHelp(cmd: []const u8) bool {
         , .{});
         return true;
     }
-    if (std.mem.eql(u8, cmd, "comment")) {
+    if (std.mem.eql(u8, cmd, "comment") or std.mem.eql(u8, cmd, "reply")) {
         std.debug.print(
-            \\tissue comment - add comment
+            \\tissue reply - add comment (alias: comment)
             \\
             \\Usage:
-            \\  tissue comment <id> -m "text" [--json|--quiet]
+            \\  tissue reply <id> -m "text" [--json|--quiet]
             \\
             \\Description:
             \\  Adds a comment to an issue. Body/message expands \n, \t, and \\.
@@ -1772,7 +1859,7 @@ fn printCommandHelp(cmd: []const u8) bool {
             \\  JSON: {{id, issue_id, body}}
             \\
             \\Example:
-            \\  tissue comment tissue-a3f8e9 -m "Investigating\nWorking on fix"
+            \\  tissue reply tissue-a3f8e9 -m "Investigating\nWorking on fix"
             \\
         , .{});
         return true;
