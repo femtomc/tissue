@@ -140,7 +140,7 @@ jobs:
         with:
           repository: ${{ env.SITE_REPO }}
           path: site
-          token: ${{ secrets.SITE_DEPLOY_TOKEN }}
+          token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Deploy to site
         run: |
