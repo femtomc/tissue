@@ -6,7 +6,7 @@
 //!
 //! Commands: init, post (new), list, search, show, edit, status, reply (comment), tag, dep, deps, ready, clean
 //!
-//! Store discovery priority: --store flag > TISSUE_STORE env > directory walk
+//! Store discovery priority: --store flag > directory walk > TISSUE_STORE env
 
 const std = @import("std");
 const tissue = @import("tissue");
