@@ -40,7 +40,7 @@ jobs:
 
       - name: Build
         run: |
-          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+          zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.target }}
           mv zig-out/bin/tissue ${{ matrix.artifact }}
 
       - name: Upload artifact
@@ -149,6 +149,11 @@ jobs:
       - name: Deploy to site
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+
+          # Prune old versions (keep only latest)
+          rm -rf site/releases/tissue/v*
+
+          # Deploy new version
           mkdir -p "site/releases/tissue/${VERSION}"
           cp release/* "site/releases/tissue/${VERSION}/"
           cp release/install.sh "site/releases/tissue/install.sh"
