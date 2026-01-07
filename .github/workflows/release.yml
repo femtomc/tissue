@@ -158,12 +158,13 @@ jobs:
           cp release/* "site/releases/tissue/${VERSION}/"
           cp release/install.sh "site/releases/tissue/install.sh"
 
-          # Update manifest
+          # Update manifest with version and binary sizes
           cd site/releases
+          SIZES=$(cd ../tissue/${VERSION} && for f in tissue-*; do echo "\"$f\": $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"; done | paste -sd, -)
           if [ -f manifest.json ]; then
-            jq --arg v "$VERSION" '.tissue = $v' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+            jq --arg v "$VERSION" --argjson sizes "{$SIZES}" '.tissue = {version: $v, sizes: $sizes}' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
           else
-            echo "{\"tissue\": \"$VERSION\"}" > manifest.json
+            echo "{\"tissue\": {\"version\": \"$VERSION\", \"sizes\": {$SIZES}}}" > manifest.json
           fi
 
       - name: Commit and push to site
