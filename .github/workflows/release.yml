@@ -160,7 +160,7 @@ jobs:
 
           # Update manifest with version and binary sizes
           cd site/releases
-          SIZES=$(cd ../tissue/${VERSION} && for f in tissue-*; do echo "\"$f\": $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"; done | paste -sd, -)
+          SIZES=$(cd tissue/${VERSION} && for f in tissue-*; do echo "\"$f\": $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"; done | paste -sd, -)
           if [ -f manifest.json ]; then
             jq --arg v "$VERSION" --argjson sizes "{$SIZES}" '.tissue = {version: $v, sizes: $sizes}' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
           else
