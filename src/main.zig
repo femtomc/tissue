@@ -4,7 +4,7 @@
 //! tissue CLI. It handles argument parsing, store discovery, and formatting
 //! of output (both human-readable and JSON).
 //!
-//! Commands: init, post (new), list, search, show, edit, status, reply (comment), tag, dep, deps, ready, clean
+//! Commands: init, post (new), list, search, show, edit, status, reply (comment), tag, dep, deps, ready, clean, migrate
 //!
 //! Store discovery priority: --store flag > directory walk > TISSUE_STORE env
 
@@ -180,6 +180,8 @@ pub fn main() !void {
             break :blk cmdReady(allocator, stdout, &store, cmd_args);
         } else if (std.mem.eql(u8, cmd, "clean")) {
             break :blk cmdClean(allocator, stdout, &store, cmd_args);
+        } else if (std.mem.eql(u8, cmd, "migrate")) {
+            break :blk cmdMigrate(allocator, stdout, &store, cmd_args);
         } else {
             die("unknown command: {s}", .{cmd});
         }
@@ -1067,6 +1069,252 @@ fn rewriteJsonlWithoutIssues(allocator: std.mem.Allocator, store: *Store, ids_to
     try std.fs.renameAbsolute(tmp_path, store.jsonl_path);
 }
 
+fn cmdMigrate(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
+    var source_path: ?[]const u8 = null;
+    var json = false;
+    var dry_run = false;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dry-run")) {
+            dry_run = true;
+            i += 1;
+            continue;
+        }
+        if (arg.len > 0 and arg[0] != '-') {
+            if (source_path != null) die("multiple source paths provided", .{});
+            source_path = arg;
+            i += 1;
+            continue;
+        }
+        die("unknown flag: {s}", .{arg});
+    }
+
+    if (source_path == null) die("usage: tissue migrate <source-store> [--dry-run] [--json]", .{});
+
+    // Resolve source path
+    const resolved_source = try resolvePath(allocator, source_path.?);
+    defer allocator.free(resolved_source);
+
+    // Check source jsonl exists
+    const source_jsonl = try std.fs.path.join(allocator, &.{ resolved_source, "issues.jsonl" });
+    defer allocator.free(source_jsonl);
+
+    if (!fileExists(source_jsonl)) {
+        die("source store not found: {s}", .{resolved_source});
+    }
+
+    // Read source jsonl
+    var source_file = try std.fs.openFileAbsolute(source_jsonl, .{});
+    defer source_file.close();
+    const stat = try source_file.stat();
+    const source_content = try allocator.alloc(u8, stat.size);
+    defer allocator.free(source_content);
+    const bytes_read = try source_file.readAll(source_content);
+    const actual_content = source_content[0..bytes_read];
+
+    // Build set of existing issue IDs in destination
+    var existing_ids = std.StringHashMap(void).init(allocator);
+    defer existing_ids.deinit();
+    {
+        const stmt = try tissue.sqlite.prepare(store.db, "SELECT id FROM issues;");
+        defer tissue.sqlite.finalize(stmt);
+        while (try tissue.sqlite.step(stmt)) {
+            const id = tissue.sqlite.columnText(stmt, 0);
+            const id_copy = try allocator.dupe(u8, id);
+            try existing_ids.put(id_copy, {});
+        }
+    }
+    // Also track existing comment IDs
+    var existing_comment_ids = std.StringHashMap(void).init(allocator);
+    defer existing_comment_ids.deinit();
+    {
+        const stmt = try tissue.sqlite.prepare(store.db, "SELECT id FROM comments;");
+        defer tissue.sqlite.finalize(stmt);
+        while (try tissue.sqlite.step(stmt)) {
+            const id = tissue.sqlite.columnText(stmt, 0);
+            const id_copy = try allocator.dupe(u8, id);
+            try existing_comment_ids.put(id_copy, {});
+        }
+    }
+
+    // Also track existing deps (by src_id|dst_id|kind composite key)
+    var existing_deps = std.StringHashMap(void).init(allocator);
+    defer existing_deps.deinit();
+    {
+        const stmt = try tissue.sqlite.prepare(store.db, "SELECT src_id, dst_id, kind FROM deps WHERE state = 'active';");
+        defer tissue.sqlite.finalize(stmt);
+        while (try tissue.sqlite.step(stmt)) {
+            const src_id = tissue.sqlite.columnText(stmt, 0);
+            const dst_id = tissue.sqlite.columnText(stmt, 1);
+            const kind = tissue.sqlite.columnText(stmt, 2);
+            const key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ src_id, dst_id, kind });
+            try existing_deps.put(key, {});
+        }
+    }
+
+    // Free all keys when done
+    defer {
+        var key_iter = existing_ids.keyIterator();
+        while (key_iter.next()) |k| allocator.free(k.*);
+    }
+    defer {
+        var key_iter = existing_comment_ids.keyIterator();
+        while (key_iter.next()) |k| allocator.free(k.*);
+    }
+    defer {
+        var key_iter = existing_deps.keyIterator();
+        while (key_iter.next()) |k| allocator.free(k.*);
+    }
+
+    // Collect lines to migrate (issues first, then comments, then deps)
+    var issue_lines: std.ArrayList([]const u8) = .empty;
+    defer issue_lines.deinit(allocator);
+    var comment_lines: std.ArrayList([]const u8) = .empty;
+    defer comment_lines.deinit(allocator);
+    var dep_lines: std.ArrayList([]const u8) = .empty;
+    defer dep_lines.deinit(allocator);
+
+    var migrated_issue_ids = std.StringHashMap(void).init(allocator);
+    defer {
+        var key_iter = migrated_issue_ids.keyIterator();
+        while (key_iter.next()) |k| allocator.free(k.*);
+        migrated_issue_ids.deinit();
+    }
+
+    var lines = std.mem.splitScalar(u8, actual_content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r\n\t ");
+        if (line.len == 0) continue;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const obj = parsed.value.object;
+
+        const type_val = obj.get("type") orelse continue;
+        if (type_val != .string) continue;
+        const type_str = type_val.string;
+
+        if (std.mem.eql(u8, type_str, "issue")) {
+            const id_val = obj.get("id") orelse continue;
+            if (id_val != .string) continue;
+            const issue_id = id_val.string;
+
+            // Skip if already exists in destination
+            if (existing_ids.contains(issue_id)) continue;
+            // Skip if already seen in this migration
+            if (migrated_issue_ids.contains(issue_id)) continue;
+
+            // Track that we're migrating this issue (dupe since parsed will be freed)
+            const id_copy = try allocator.dupe(u8, issue_id);
+            try migrated_issue_ids.put(id_copy, {});
+            try issue_lines.append(allocator, line);
+        } else if (std.mem.eql(u8, type_str, "comment")) {
+            const id_val = obj.get("id") orelse continue;
+            if (id_val != .string) continue;
+            const comment_id = id_val.string;
+
+            // Skip if comment already exists
+            if (existing_comment_ids.contains(comment_id)) continue;
+
+            // Only migrate if the parent issue is being migrated or exists
+            const issue_id_val = obj.get("issue_id") orelse continue;
+            if (issue_id_val != .string) continue;
+            const issue_id = issue_id_val.string;
+
+            if (existing_ids.contains(issue_id) or migrated_issue_ids.contains(issue_id)) {
+                try comment_lines.append(allocator, line);
+            }
+        } else if (std.mem.eql(u8, type_str, "dep")) {
+            // Only migrate deps if both issues exist or are being migrated
+            const src_val = obj.get("src_id") orelse continue;
+            const dst_val = obj.get("dst_id") orelse continue;
+            const kind_val = obj.get("kind") orelse continue;
+            if (src_val != .string or dst_val != .string or kind_val != .string) continue;
+            const src_id = src_val.string;
+            const dst_id = dst_val.string;
+            const kind = kind_val.string;
+
+            // Skip if dep already exists
+            const dep_key = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ src_id, dst_id, kind });
+            defer allocator.free(dep_key);
+            if (existing_deps.contains(dep_key)) continue;
+
+            const src_exists = existing_ids.contains(src_id) or migrated_issue_ids.contains(src_id);
+            const dst_exists = existing_ids.contains(dst_id) or migrated_issue_ids.contains(dst_id);
+
+            if (src_exists and dst_exists) {
+                try dep_lines.append(allocator, line);
+            }
+        }
+    }
+
+    const total_migrated = issue_lines.items.len;
+    const comments_migrated = comment_lines.items.len;
+    const deps_migrated = dep_lines.items.len;
+
+    if (json) {
+        const record = struct {
+            dry_run: bool,
+            issues: usize,
+            comments: usize,
+            deps: usize,
+        }{
+            .dry_run = dry_run,
+            .issues = total_migrated,
+            .comments = comments_migrated,
+            .deps = deps_migrated,
+        };
+        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
+        try stdout.writeByte('\n');
+    } else {
+        if (dry_run) {
+            try stdout.print("Would migrate {d} issue(s), {d} comment(s), {d} dep(s) from {s}\n", .{ total_migrated, comments_migrated, deps_migrated, resolved_source });
+        } else {
+            try stdout.print("Migrating {d} issue(s), {d} comment(s), {d} dep(s) from {s}\n", .{ total_migrated, comments_migrated, deps_migrated, resolved_source });
+        }
+    }
+
+    if (dry_run or (total_migrated == 0 and comments_migrated == 0 and deps_migrated == 0)) return;
+
+    // Append to destination jsonl (issues first, then deps, then comments)
+    var dest_file = try std.fs.openFileAbsolute(store.jsonl_path, .{ .mode = .read_write });
+    defer dest_file.close();
+    try dest_file.seekFromEnd(0);
+
+    var write_buf: [4096]u8 = undefined;
+    var writer = dest_file.writer(&write_buf);
+
+    for (issue_lines.items) |line| {
+        try writer.interface.writeAll(line);
+        try writer.interface.writeByte('\n');
+    }
+    for (dep_lines.items) |line| {
+        try writer.interface.writeAll(line);
+        try writer.interface.writeByte('\n');
+    }
+    for (comment_lines.items) |line| {
+        try writer.interface.writeAll(line);
+        try writer.interface.writeByte('\n');
+    }
+    try writer.interface.flush();
+    try dest_file.sync();
+
+    // Force reimport to rebuild SQLite
+    try store.forceReimport();
+
+    if (!json) {
+        try stdout.print("Migration complete.\n", .{});
+    }
+}
+
 fn parseDays(val: []const u8) u32 {
     // Parse "30d" or "30" format
     var num_end: usize = val.len;
@@ -1628,6 +1876,9 @@ fn printUsage() void {
         \\  clean [--older-than Nd] [--force] [--json]
         \\      Remove closed/duplicate issues from the JSONL log (use --force to execute).
         \\
+        \\  migrate <source-store> [--dry-run] [--json]
+        \\      Import issues from another tissue store. Skips duplicates by ID.
+        \\
         \\Examples:
         \\  tissue init --prefix acme
         \\  id=$(tissue new "Fix flaky tests" --quiet)
@@ -1995,6 +2246,33 @@ fn printCommandHelp(cmd: []const u8) bool {
             \\Examples:
             \\  tissue clean --older-than 30d
             \\  tissue clean --older-than 30 --force --json
+            \\
+        , .{});
+        return true;
+    }
+    if (std.mem.eql(u8, cmd, "migrate")) {
+        std.debug.print(
+            \\tissue migrate - import issues from another store
+            \\
+            \\Usage:
+            \\  tissue migrate <source-store> [--dry-run] [--json]
+            \\
+            \\Description:
+            \\  Imports issues, comments, and dependencies from another tissue store.
+            \\  Skips records that already exist in the destination (by ID).
+            \\  Dependencies are only migrated if both referenced issues exist.
+            \\
+            \\Options:
+            \\  --dry-run  preview what would be migrated without making changes
+            \\  --json     output summary object
+            \\
+            \\Output:
+            \\  Human: count of issues/comments/deps migrated
+            \\  JSON: {{"dry_run":false,"issues":N,"comments":N,"deps":N}}
+            \\
+            \\Examples:
+            \\  tissue migrate ~/Dev/project/.tissue --dry-run
+            \\  tissue migrate /path/to/.tissue --json
             \\
         , .{});
         return true;

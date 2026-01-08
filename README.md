@@ -68,6 +68,7 @@ tissue-b19c2d   open    2    Add caching layer
 | `dep add/rm <id> <kind> <target>` | Link issues (`blocks`, `relates`, `parent`) |
 | `ready` | List open issues with no blockers |
 | `clean` | Remove old closed issues |
+| `migrate <source>` | Import issues from another store |
 
 All commands support `--json` for machine output and `--quiet` for ID-only output.
 
