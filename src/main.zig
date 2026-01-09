@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const tissue = @import("tissue");
+const build_options = @import("build_options");
 
 const Store = tissue.store.Store;
 
@@ -116,7 +117,7 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.writeAll("tissue 0.3.2\n");
+        try stdout.print("tissue {s}\n", .{build_options.version});
         return;
     }
     if (std.mem.eql(u8, cmd, "help")) {
