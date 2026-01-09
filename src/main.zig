@@ -839,15 +839,23 @@ fn cmdDeps(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, 
 
 fn cmdReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
     var json = false;
+    var limit: ?i64 = null;
     var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--json")) {
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--json")) {
             json = true;
-        } else {
-            die("unknown flag: {s}", .{args[i]});
+            i += 1;
+            continue;
         }
+        if (std.mem.eql(u8, arg, "--limit")) {
+            const val = nextValue(args, &i, "limit");
+            limit = parseInt(i64, val, "limit");
+            continue;
+        }
+        die("unknown flag: {s}", .{arg});
     }
-    try listReady(allocator, stdout, store, json);
+    try listReady(allocator, stdout, store, limit, json);
 }
 
 fn cmdClean(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, args: []const []const u8) !void {
@@ -1456,9 +1464,11 @@ fn listIssues(
     }
 }
 
-fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, json: bool) !void {
-    _ = allocator;
-    const sql =
+fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store, limit: ?i64, json: bool) !void {
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator,
         \\WITH RECURSIVE blockers(src, dst) AS (
         \\  SELECT d.src_id, d.dst_id
         \\  FROM deps d
@@ -1481,10 +1491,18 @@ fn listReady(allocator: std.mem.Allocator, stdout: *std.Io.Writer, store: *Store
         \\  JOIN issues bi ON bi.id = b.src
         \\  WHERE b.dst = i.id AND bi.status IN ('open','in_progress','paused')
         \\)
-        \\ORDER BY i.updated_at DESC
-    ;
-    const stmt = try tissue.sqlite.prepare(store.db, sql);
+        \\ORDER BY i.priority ASC, i.updated_at DESC
+    );
+    if (limit != null) {
+        try sql.appendSlice(allocator, " LIMIT ?");
+    }
+
+    const stmt = try tissue.sqlite.prepare(store.db, sql.items);
     defer tissue.sqlite.finalize(stmt);
+
+    if (limit != null) {
+        try tissue.sqlite.bindInt64(stmt, 1, limit.?);
+    }
 
     if (json) {
         try stdout.writeByte('[');
@@ -1871,7 +1889,7 @@ fn printUsage() void {
         \\  deps <id> [--json]
         \\      List active deps that involve the issue.
         \\
-        \\  ready [--json]
+        \\  ready [--limit N] [--json]
         \\      List open issues with no active blockers (open/in_progress/paused).
         \\
         \\  clean [--older-than Nd] [--force] [--json]
@@ -2206,19 +2224,22 @@ fn printCommandHelp(cmd: []const u8) bool {
             \\tissue ready - list unblocked issues
             \\
             \\Usage:
-            \\  tissue ready [--json]
+            \\  tissue ready [--limit N] [--json]
             \\
             \\Description:
             \\  Lists open issues with no active blockers (transitive blocks only).
             \\  Blockers include issues with status open, in_progress, or paused.
+            \\  Results are sorted by priority (highest first), then by update time.
             \\
             \\Options:
-            \\  --json  output array of list rows
+            \\  --limit N  limit to N results
+            \\  --json     output array of list rows
             \\
             \\Output:
             \\  Same shape as tissue list
             \\
             \\Example:
+            \\  tissue ready --limit 10
             \\  tissue ready --json
             \\
         , .{});
