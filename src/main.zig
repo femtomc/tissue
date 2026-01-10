@@ -1396,7 +1396,9 @@ fn printIssueDetails(output: *cli.Output, issue: *const tissue.store.Issue, comm
     try output.print("Created: {s}\n", .{created_str});
     try output.print("Updated: {s}\n", .{updated_str});
     if (issue.body.len > 0) {
-        try output.print("\n{s}\n", .{issue.body});
+        try output.write("\n");
+        try output.write(issue.body);
+        try output.write("\n");
     }
     if (deps.len > 0) {
         try output.print("\nDeps:\n", .{});
@@ -1407,7 +1409,9 @@ fn printIssueDetails(output: *cli.Output, issue: *const tissue.store.Issue, comm
     if (comments.len > 0) {
         try output.print("\nComments:\n", .{});
         for (comments) |comment| {
-            try output.print("- {s}\n", .{comment.body});
+            try output.write("- ");
+            try output.write(comment.body);
+            try output.write("\n");
         }
     }
 }
